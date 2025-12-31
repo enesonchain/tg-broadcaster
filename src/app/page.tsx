@@ -25,6 +25,14 @@ interface LogEntry {
   timestamp: string;
 }
 
+interface DiscoveredChat {
+  id: number;
+  title: string;
+  type: 'group' | 'supergroup' | 'channel' | 'private';
+  username?: string;
+  source: 'message' | 'register_command' | 'bot_added';
+}
+
 type Step = 'setup' | 'connected';
 type Tab = 'chats' | 'compose' | 'settings' | 'logs';
 
@@ -61,7 +69,12 @@ export default function TelegramBotBroadcaster() {
   const [parseMode, setParseMode] = useState<'HTML' | 'Markdown' | 'none'>('HTML');
   const [disableNotification, setDisableNotification] = useState(false);
   const [protectContent, setProtectContent] = useState(false);
-  
+
+  // Discovery state
+  const [discoveredChats, setDiscoveredChats] = useState<DiscoveredChat[]>([]);
+  const [isDiscovering, setIsDiscovering] = useState(false);
+  const [lastUpdateId, setLastUpdateId] = useState<number | null>(null);
+
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   // ==================== HELPERS ====================
@@ -310,6 +323,136 @@ export default function TelegramBotBroadcaster() {
     }
   };
 
+  // ==================== AUTO-DISCOVER ====================
+  const discoverChats = async () => {
+    setIsDiscovering(true);
+    addLog('Scanning for chats...', 'info');
+
+    try {
+      // Fetch recent updates from the bot
+      const params: Record<string, any> = {
+        limit: 100,
+        allowed_updates: ['message', 'channel_post', 'my_chat_member'],
+      };
+
+      if (lastUpdateId) {
+        params.offset = lastUpdateId + 1;
+      }
+
+      const updates = await callBotApi('getUpdates', params);
+
+      if (updates.length === 0) {
+        addLog('No new updates found. Try sending /register in a group where your bot is a member.', 'warning');
+        setIsDiscovering(false);
+        return;
+      }
+
+      // Track the last update ID
+      const maxUpdateId = Math.max(...updates.map((u: any) => u.update_id));
+      setLastUpdateId(maxUpdateId);
+
+      // Extract unique chats from updates
+      const chatMap = new Map<number, DiscoveredChat>();
+      const existingChatIds = new Set(chats.map(c => c.id));
+
+      for (const update of updates) {
+        let chat: any = null;
+        let source: DiscoveredChat['source'] = 'message';
+
+        // Check for /register command
+        if (update.message) {
+          chat = update.message.chat;
+          const text = update.message.text || '';
+          if (text.toLowerCase().startsWith('/register')) {
+            source = 'register_command';
+          }
+        } else if (update.channel_post) {
+          chat = update.channel_post.chat;
+          const text = update.channel_post.text || '';
+          if (text.toLowerCase().startsWith('/register')) {
+            source = 'register_command';
+          }
+        } else if (update.my_chat_member) {
+          // Bot was added to a chat
+          chat = update.my_chat_member.chat;
+          source = 'bot_added';
+        }
+
+        if (chat && !existingChatIds.has(chat.id) && !chatMap.has(chat.id)) {
+          // Skip private chats unless it's from /register
+          if (chat.type === 'private' && source !== 'register_command') {
+            continue;
+          }
+
+          chatMap.set(chat.id, {
+            id: chat.id,
+            title: chat.title || chat.first_name || chat.username || `Chat ${chat.id}`,
+            type: chat.type,
+            username: chat.username,
+            source,
+          });
+        }
+      }
+
+      const discovered = Array.from(chatMap.values());
+
+      // Prioritize /register commands at the top
+      discovered.sort((a, b) => {
+        if (a.source === 'register_command' && b.source !== 'register_command') return -1;
+        if (b.source === 'register_command' && a.source !== 'register_command') return 1;
+        return 0;
+      });
+
+      setDiscoveredChats(discovered);
+
+      const registerCount = discovered.filter(c => c.source === 'register_command').length;
+      if (discovered.length > 0) {
+        addLog(`Found ${discovered.length} new chat(s)${registerCount > 0 ? ` (${registerCount} via /register)` : ''}`, 'success');
+      } else {
+        addLog('No new chats found. All discovered chats are already added.', 'info');
+      }
+    } catch (err: any) {
+      addLog(`Discovery failed: ${err.message}`, 'error');
+    } finally {
+      setIsDiscovering(false);
+    }
+  };
+
+  const addDiscoveredChat = async (discovered: DiscoveredChat) => {
+    setIsLoading(true);
+    try {
+      // Get full chat info and member count
+      const chat = await callBotApi('getChat', { chat_id: discovered.id });
+
+      const newChat: Chat = {
+        id: chat.id,
+        title: chat.title || chat.first_name || chat.username || `Chat ${chat.id}`,
+        type: chat.type,
+        username: chat.username,
+      };
+
+      // Try to get member count
+      try {
+        const count = await callBotApi('getChatMemberCount', { chat_id: chat.id });
+        newChat.memberCount = count;
+      } catch {}
+
+      setChats(prev => [...prev, newChat]);
+      setDiscoveredChats(prev => prev.filter(c => c.id !== discovered.id));
+      addLog(`Added: ${newChat.title}`, 'success');
+    } catch (err: any) {
+      addLog(`Failed to add ${discovered.title}: ${err.message}`, 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const addAllDiscoveredChats = async () => {
+    for (const chat of discoveredChats) {
+      await addDiscoveredChat(chat);
+    }
+  };
+
   const disconnect = () => {
     localStorage.removeItem('tg_bot_token');
     setBotToken('');
@@ -521,6 +664,92 @@ export default function TelegramBotBroadcaster() {
               {/* Chats Tab */}
               {activeTab === 'chats' && (
                 <div>
+                  {/* Auto-Discover Section */}
+                  <div className="p-4 border-b border-white/5 bg-gradient-to-r from-[#2AABEE]/5 to-emerald-500/5">
+                    <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
+                      <div>
+                        <h4 className="font-medium flex items-center gap-2">
+                          <span>🔍</span> Auto-Discover Chats
+                        </h4>
+                        <p className="text-xs text-white/40 mt-1">
+                          Scan for groups/channels where your bot received messages or /register command
+                        </p>
+                      </div>
+                      <button
+                        onClick={discoverChats}
+                        disabled={isDiscovering}
+                        className="px-4 py-2.5 bg-[#2AABEE] hover:bg-[#3bb5f5] rounded-xl text-sm font-medium disabled:opacity-50 transition-colors flex items-center gap-2 whitespace-nowrap"
+                      >
+                        {isDiscovering ? (
+                          <>
+                            <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                            </svg>
+                            Scanning...
+                          </>
+                        ) : (
+                          <>
+                            <span>🔍</span> Discover Chats
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    {/* Discovered Chats */}
+                    {discoveredChats.length > 0 && (
+                      <div className="mt-4">
+                        <div className="flex items-center justify-between mb-2">
+                          <p className="text-sm text-white/60">
+                            Found {discoveredChats.length} new chat(s)
+                          </p>
+                          <button
+                            onClick={addAllDiscoveredChats}
+                            disabled={isLoading}
+                            className="text-xs text-[#2AABEE] hover:text-[#3bb5f5] transition-colors"
+                          >
+                            Add All
+                          </button>
+                        </div>
+                        <div className="space-y-2 max-h-[200px] overflow-y-auto">
+                          {discoveredChats.map(chat => (
+                            <div
+                              key={chat.id}
+                              className="flex items-center gap-3 p-3 bg-black/20 rounded-xl"
+                            >
+                              <div className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center text-sm">
+                                {chat.type === 'channel' ? '📢' : chat.type === 'private' ? '👤' : '👥'}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="font-medium text-sm truncate">{chat.title}</p>
+                                <p className="text-xs text-white/40">
+                                  {chat.type}
+                                  {chat.source === 'register_command' && (
+                                    <span className="ml-2 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-[10px]">
+                                      /register
+                                    </span>
+                                  )}
+                                  {chat.source === 'bot_added' && (
+                                    <span className="ml-2 px-1.5 py-0.5 bg-[#2AABEE]/20 text-[#2AABEE] rounded text-[10px]">
+                                      bot added
+                                    </span>
+                                  )}
+                                </p>
+                              </div>
+                              <button
+                                onClick={() => addDiscoveredChat(chat)}
+                                disabled={isLoading}
+                                className="px-3 py-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
+                              >
+                                + Add
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
                   <div className="p-4 border-b border-white/5">
                     <div className="flex flex-col sm:flex-row gap-3">
                       {/* Add Chat */}
@@ -541,7 +770,7 @@ export default function TelegramBotBroadcaster() {
                           Add
                         </button>
                       </div>
-                      
+
                       {/* Filter */}
                       <div className="flex gap-2">
                         <select
@@ -562,7 +791,7 @@ export default function TelegramBotBroadcaster() {
                         </button>
                       </div>
                     </div>
-                    
+
                     {error && (
                       <div className="mt-3 px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-sm">
                         {error}
@@ -820,14 +1049,18 @@ export default function TelegramBotBroadcaster() {
               <h3 className="font-semibold mb-3 flex items-center gap-2">
                 <span>💡</span> How to Add Chats
               </h3>
-              <div className="grid md:grid-cols-3 gap-4 text-sm text-white/60">
+              <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4 text-sm text-white/60">
+                <div className="p-3 bg-emerald-500/5 border border-emerald-500/10 rounded-xl">
+                  <p className="font-medium text-emerald-400 mb-1">Easy Way: /register</p>
+                  <p>Add bot to any group, send <code className="px-1 py-0.5 bg-white/10 rounded text-xs">/register</code>, then click "Discover Chats"</p>
+                </div>
                 <div>
                   <p className="font-medium text-white mb-1">Channels</p>
                   <p>Make your bot an admin, then add using @username or channel ID</p>
                 </div>
                 <div>
                   <p className="font-medium text-white mb-1">Groups</p>
-                  <p>Add bot to group, then add using group ID (use @userinfobot to get ID)</p>
+                  <p>Add bot to group, then click "Discover Chats" or add manually by ID</p>
                 </div>
                 <div>
                   <p className="font-medium text-white mb-1">Users</p>
