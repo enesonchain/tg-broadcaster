@@ -79,6 +79,18 @@ export default function TelegramBotBroadcaster() {
 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
+  // ==================== VALIDATION HELPERS ====================
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const isValidChat = (c: any): c is Chat => {
+    return (
+      typeof c === 'object' &&
+      c !== null &&
+      typeof c.id === 'number' &&
+      typeof c.title === 'string' &&
+      ['group', 'supergroup', 'channel', 'private'].includes(c.type)
+    );
+  };
+
   // ==================== HELPERS ====================
   const addLog = useCallback((msg: string, type: LogEntry['type'] = 'info') => {
     const timestamp = new Date().toLocaleTimeString();
@@ -98,24 +110,43 @@ export default function TelegramBotBroadcaster() {
     const savedToken = remembered
       ? localStorage.getItem('tg_bot_token')
       : sessionStorage.getItem('tg_bot_token');
-    const savedChats = localStorage.getItem('tg_bot_chats');
+
+    // Chats follow the same storage as token for consistency
+    const savedChats = remembered
+      ? localStorage.getItem('tg_bot_chats')
+      : sessionStorage.getItem('tg_bot_chats');
 
     if (savedToken) {
       setBotToken(savedToken);
     }
     if (savedChats) {
       try {
-        setChats(JSON.parse(savedChats));
+        const parsed = JSON.parse(savedChats);
+        // Validate the parsed data is an array of valid chat objects
+        if (Array.isArray(parsed) && parsed.every(isValidChat)) {
+          setChats(parsed);
+        }
       } catch {}
     }
   }, []);
 
-  // Save chats whenever they change
+  // Save chats whenever they change (follows token storage setting)
   useEffect(() => {
     if (chats.length > 0) {
-      localStorage.setItem('tg_bot_chats', JSON.stringify(chats));
+      const chatData = JSON.stringify(chats);
+      if (rememberToken) {
+        localStorage.setItem('tg_bot_chats', chatData);
+        sessionStorage.removeItem('tg_bot_chats');
+      } else {
+        sessionStorage.setItem('tg_bot_chats', chatData);
+        localStorage.removeItem('tg_bot_chats');
+      }
+    } else {
+      // Clear both when no chats
+      localStorage.removeItem('tg_bot_chats');
+      sessionStorage.removeItem('tg_bot_chats');
     }
-  }, [chats]);
+  }, [chats, rememberToken]);
 
   // ==================== API CALLS ====================
   const callBotApi = async (method: string, params: Record<string, any> = {}) => {
@@ -140,6 +171,13 @@ export default function TelegramBotBroadcaster() {
   const connectBot = async () => {
     if (!botToken.trim()) {
       setError('Please enter your bot token');
+      return;
+    }
+
+    // Validate bot token format (number:alphanumeric)
+    const tokenRegex = /^\d+:[A-Za-z0-9_-]+$/;
+    if (!tokenRegex.test(botToken.trim())) {
+      setError('Invalid token format. Expected format: 123456789:ABCdefGHI...');
       return;
     }
 
@@ -520,14 +558,21 @@ export default function TelegramBotBroadcaster() {
   };
 
   const disconnect = () => {
+    // Clear all stored data from both storages
     localStorage.removeItem('tg_bot_token');
     localStorage.removeItem('tg_remember_token');
+    localStorage.removeItem('tg_bot_chats');
     sessionStorage.removeItem('tg_bot_token');
+    sessionStorage.removeItem('tg_bot_chats');
+
+    // Reset state
     setBotToken('');
     setBotInfo(null);
+    setChats([]);
+    setSelectedChats(new Set());
     setStep('setup');
     setRememberToken(false);
-    addLog('Disconnected', 'info');
+    addLog('Disconnected - all data cleared', 'info');
   };
 
   const filteredChats = getFilteredChats();
