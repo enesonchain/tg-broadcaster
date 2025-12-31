@@ -78,6 +78,7 @@ export default function TelegramBotBroadcaster() {
   const [rememberToken, setRememberToken] = useState(false);
 
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const hasAutoRefreshed = useRef(false);
 
   // ==================== VALIDATION HELPERS ====================
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -455,20 +456,32 @@ export default function TelegramBotBroadcaster() {
         }
       }
 
-      const discovered = Array.from(chatMap.values());
+      const potentialChats = Array.from(chatMap.values());
+
+      // Verify bot is still a member of each chat
+      const verified: DiscoveredChat[] = [];
+      for (const chat of potentialChats) {
+        try {
+          await callBotApi('getChat', { chat_id: chat.id });
+          verified.push(chat);
+        } catch {
+          // Bot was kicked or chat deleted, skip it
+          addLog(`Skipped ${chat.title}: bot no longer has access`, 'warning');
+        }
+      }
 
       // Prioritize /register commands at the top
-      discovered.sort((a, b) => {
+      verified.sort((a, b) => {
         if (a.source === 'register_command' && b.source !== 'register_command') return -1;
         if (b.source === 'register_command' && a.source !== 'register_command') return 1;
         return 0;
       });
 
-      setDiscoveredChats(discovered);
+      setDiscoveredChats(verified);
 
-      const registerCount = discovered.filter(c => c.source === 'register_command').length;
-      if (discovered.length > 0) {
-        addLog(`Found ${discovered.length} new chat(s)${registerCount > 0 ? ` (${registerCount} via /register)` : ''}`, 'success');
+      const registerCount = verified.filter(c => c.source === 'register_command').length;
+      if (verified.length > 0) {
+        addLog(`Found ${verified.length} new chat(s)${registerCount > 0 ? ` (${registerCount} via /register)` : ''}`, 'success');
       } else {
         addLog('No new chats found. All discovered chats are already added.', 'info');
       }
@@ -562,6 +575,20 @@ export default function TelegramBotBroadcaster() {
     addLog(`Refresh complete: ${updated} active, ${kicked} kicked/removed`, kicked > 0 ? 'warning' : 'success');
     setIsRefreshing(false);
   };
+
+  // Auto-refresh saved chats after connecting
+  useEffect(() => {
+    if (step === 'connected' && chats.length > 0 && botInfo && !hasAutoRefreshed.current) {
+      hasAutoRefreshed.current = true;
+      addLog('Validating saved chats...', 'info');
+      refreshChats();
+    }
+    // Reset when disconnected
+    if (step === 'setup') {
+      hasAutoRefreshed.current = false;
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, botInfo]);
 
   const disconnect = () => {
     // Clear all stored data from both storages
