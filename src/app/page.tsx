@@ -750,6 +750,45 @@ export default function TelegramBotBroadcaster() {
                     )}
                   </div>
 
+                  {/* Quick Add Bot Links */}
+                  {botInfo?.username && (
+                    <div className="p-4 border-b border-white/5">
+                      <h4 className="font-medium flex items-center gap-2 mb-3">
+                        <span>⚡</span> Quick Add Bot to Chats
+                      </h4>
+                      <div className="flex flex-wrap gap-2">
+                        <a
+                          href={`https://t.me/${botInfo.username}?startgroup=true`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-2 px-4 py-2.5 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 rounded-xl text-sm text-emerald-400 transition-colors"
+                        >
+                          <span>👥</span> Add to Group
+                        </a>
+                        <a
+                          href={`https://t.me/${botInfo.username}?startchannel=true`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-2 px-4 py-2.5 bg-[#2AABEE]/10 hover:bg-[#2AABEE]/20 border border-[#2AABEE]/20 rounded-xl text-sm text-[#2AABEE] transition-colors"
+                        >
+                          <span>📢</span> Add to Channel
+                        </a>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(`https://t.me/${botInfo.username}?startgroup=true`);
+                            addLog('Group invite link copied!', 'success');
+                          }}
+                          className="flex items-center gap-2 px-4 py-2.5 bg-white/5 hover:bg-white/10 rounded-xl text-sm text-white/60 transition-colors"
+                        >
+                          <span>📋</span> Copy Link
+                        </button>
+                      </div>
+                      <p className="text-xs text-white/40 mt-2">
+                        Click to open Telegram and select chats. After adding, click "Discover Chats" above.
+                      </p>
+                    </div>
+                  )}
+
                   <div className="p-4 border-b border-white/5">
                     <div className="flex flex-col sm:flex-row gap-3">
                       {/* Add Chat */}
