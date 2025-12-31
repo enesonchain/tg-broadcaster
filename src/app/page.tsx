@@ -48,6 +48,14 @@ interface ChatList {
   };
 }
 
+interface MessageTemplate {
+  id: string;
+  name: string;
+  content: string;
+  createdAt: string;
+  lastUsed: string | null;
+}
+
 const LIST_COLORS = [
   '#2AABEE', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6',
   '#EC4899', '#06B6D4', '#84CC16', '#F97316', '#6366F1'
@@ -107,6 +115,11 @@ export default function TelegramBotBroadcaster() {
   const [listSearchQuery, setListSearchQuery] = useState('');
   const [expandedLists, setExpandedLists] = useState<Set<string>>(new Set());
 
+  // Templates state
+  const [templates, setTemplates] = useState<MessageTemplate[]>([]);
+  const [showTemplateManager, setShowTemplateManager] = useState(false);
+  const [editingTemplate, setEditingTemplate] = useState<MessageTemplate | null>(null);
+
   const logsEndRef = useRef<HTMLDivElement>(null);
   const hasAutoRefreshed = useRef(false);
 
@@ -133,6 +146,18 @@ export default function TelegramBotBroadcaster() {
       typeof l.icon === 'string' &&
       Array.isArray(l.chatIds) &&
       typeof l.stats === 'object'
+    );
+  };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const isValidTemplate = (t: any): t is MessageTemplate => {
+    return (
+      typeof t === 'object' &&
+      t !== null &&
+      typeof t.id === 'string' &&
+      typeof t.name === 'string' &&
+      typeof t.content === 'string' &&
+      typeof t.createdAt === 'string'
     );
   };
 
@@ -166,6 +191,11 @@ export default function TelegramBotBroadcaster() {
       ? localStorage.getItem('tg_bot_lists')
       : sessionStorage.getItem('tg_bot_lists');
 
+    // Templates follow the same storage as token
+    const savedTemplates = remembered
+      ? localStorage.getItem('tg_bot_templates')
+      : sessionStorage.getItem('tg_bot_templates');
+
     if (savedToken) {
       setBotToken(savedToken);
     }
@@ -183,6 +213,14 @@ export default function TelegramBotBroadcaster() {
         const parsed = JSON.parse(savedLists);
         if (Array.isArray(parsed) && parsed.every(isValidList)) {
           setLists(parsed);
+        }
+      } catch {}
+    }
+    if (savedTemplates) {
+      try {
+        const parsed = JSON.parse(savedTemplates);
+        if (Array.isArray(parsed) && parsed.every(isValidTemplate)) {
+          setTemplates(parsed);
         }
       } catch {}
     }
@@ -222,6 +260,23 @@ export default function TelegramBotBroadcaster() {
       sessionStorage.removeItem('tg_bot_lists');
     }
   }, [lists, rememberToken]);
+
+  // Save templates whenever they change (follows token storage setting)
+  useEffect(() => {
+    if (templates.length > 0) {
+      const templateData = JSON.stringify(templates);
+      if (rememberToken) {
+        localStorage.setItem('tg_bot_templates', templateData);
+        sessionStorage.removeItem('tg_bot_templates');
+      } else {
+        sessionStorage.setItem('tg_bot_templates', templateData);
+        localStorage.removeItem('tg_bot_templates');
+      }
+    } else {
+      localStorage.removeItem('tg_bot_templates');
+      sessionStorage.removeItem('tg_bot_templates');
+    }
+  }, [templates, rememberToken]);
 
   // ==================== API CALLS ====================
   const callBotApi = async (method: string, params: Record<string, any> = {}) => {
@@ -558,6 +613,42 @@ export default function TelegramBotBroadcaster() {
     return lists.filter(l => l.parentId === null);
   };
 
+  // ==================== TEMPLATE MANAGEMENT ====================
+  const createTemplate = (name: string, content: string) => {
+    const newTemplate: MessageTemplate = {
+      id: `template_${Date.now()}`,
+      name,
+      content,
+      createdAt: new Date().toISOString(),
+      lastUsed: null,
+    };
+    setTemplates(prev => [...prev, newTemplate]);
+    addLog(`Created template: ${name}`, 'success');
+    return newTemplate;
+  };
+
+  const updateTemplate = (templateId: string, updates: Partial<MessageTemplate>) => {
+    setTemplates(prev => prev.map(template =>
+      template.id === templateId ? { ...template, ...updates } : template
+    ));
+  };
+
+  const deleteTemplate = (templateId: string) => {
+    setTemplates(prev => prev.filter(t => t.id !== templateId));
+    addLog('Deleted template', 'info');
+  };
+
+  const useTemplate = (template: MessageTemplate) => {
+    setMessage(template.content);
+    updateTemplate(template.id, { lastUsed: new Date().toISOString() });
+    addLog(`Loaded template: ${template.name}`, 'info');
+  };
+
+  const saveCurrentAsTemplate = () => {
+    if (!message.trim()) return;
+    setShowTemplateManager(true);
+  };
+
   const broadcastMessage = async () => {
     if (!message.trim() || selectedChats.size === 0) return;
     
@@ -887,9 +978,11 @@ export default function TelegramBotBroadcaster() {
     localStorage.removeItem('tg_remember_token');
     localStorage.removeItem('tg_bot_chats');
     localStorage.removeItem('tg_bot_lists');
+    localStorage.removeItem('tg_bot_templates');
     sessionStorage.removeItem('tg_bot_token');
     sessionStorage.removeItem('tg_bot_chats');
     sessionStorage.removeItem('tg_bot_lists');
+    sessionStorage.removeItem('tg_bot_templates');
 
     // Reset state
     setBotToken('');
@@ -899,6 +992,7 @@ export default function TelegramBotBroadcaster() {
     setLists([]);
     setSelectedLists(new Set());
     setExcludedLists(new Set());
+    setTemplates([]);
     setStep('setup');
     setRememberToken(false);
     addLog('Disconnected - all data cleared', 'info');
@@ -1627,14 +1721,71 @@ export default function TelegramBotBroadcaster() {
               {activeTab === 'compose' && (
                 <div className="p-6">
                   <h3 className="font-semibold mb-4">Compose Message</h3>
-                  
+
                   <div className="space-y-4">
+                    {/* Templates Section */}
+                    <div className="p-4 bg-gradient-to-r from-purple-500/5 to-pink-500/5 border border-white/5 rounded-xl">
+                      <div className="flex items-center justify-between mb-3">
+                        <h4 className="font-medium flex items-center gap-2 text-sm">
+                          <span>📝</span> Message Templates
+                          {templates.length > 0 && (
+                            <span className="px-1.5 py-0.5 bg-white/10 rounded text-xs">{templates.length}</span>
+                          )}
+                        </h4>
+                        {message.trim() && (
+                          <button
+                            onClick={() => setShowTemplateManager(true)}
+                            className="px-3 py-1.5 bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 rounded-lg text-xs font-medium transition-colors"
+                          >
+                            💾 Save as Template
+                          </button>
+                        )}
+                      </div>
+
+                      {templates.length === 0 ? (
+                        <p className="text-xs text-white/40">
+                          No templates yet. Type a message and click "Save as Template" to create one.
+                        </p>
+                      ) : (
+                        <div className="flex flex-wrap gap-2">
+                          {templates.map(template => (
+                            <div
+                              key={template.id}
+                              className="group flex items-center gap-1 px-3 py-1.5 bg-white/5 hover:bg-white/10 rounded-lg transition-colors"
+                            >
+                              <button
+                                onClick={() => useTemplate(template)}
+                                className="text-xs text-white/80 hover:text-white"
+                                title={template.content.substring(0, 100) + (template.content.length > 100 ? '...' : '')}
+                              >
+                                {template.name}
+                              </button>
+                              <button
+                                onClick={() => setEditingTemplate(template)}
+                                className="p-0.5 text-white/30 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                                title="Edit template"
+                              >
+                                ✏️
+                              </button>
+                              <button
+                                onClick={() => deleteTemplate(template.id)}
+                                className="p-0.5 text-white/30 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                                title="Delete template"
+                              >
+                                ✗
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
                     <div>
                       <label className="block text-sm text-white/60 mb-2">Message</label>
                       <textarea
                         value={message}
                         onChange={(e) => setMessage(e.target.value)}
-                        placeholder={parseMode === 'HTML' 
+                        placeholder={parseMode === 'HTML'
                           ? "Type your message...\n\nSupports HTML:\n<b>bold</b>, <i>italic</i>, <code>code</code>, <a href='url'>link</a>"
                           : parseMode === 'Markdown'
                           ? "Type your message...\n\nSupports Markdown:\n**bold**, _italic_, `code`, [link](url)"
@@ -2069,6 +2220,122 @@ export default function TelegramBotBroadcaster() {
                 >
                   Save Changes
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Create/Save Template Modal */}
+        {showTemplateManager && (
+          <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+            <div className="glass rounded-2xl p-6 max-w-lg w-full">
+              <h3 className="font-semibold mb-4 flex items-center gap-2">
+                <span>📝</span> Save as Template
+              </h3>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const form = e.target as HTMLFormElement;
+                  const name = (form.elements.namedItem('templateName') as HTMLInputElement).value;
+                  if (name.trim() && message.trim()) {
+                    createTemplate(name.trim(), message);
+                    setShowTemplateManager(false);
+                  }
+                }}
+                className="space-y-4"
+              >
+                <div>
+                  <label className="block text-sm text-white/60 mb-2">Template Name</label>
+                  <input
+                    name="templateName"
+                    type="text"
+                    placeholder="e.g., Weekly Update, Promo Announcement"
+                    className="w-full px-4 py-2.5 bg-black/40 border border-white/10 rounded-xl text-sm focus-ring"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-white/60 mb-2">Message Preview</label>
+                  <div className="p-3 bg-black/40 border border-white/10 rounded-xl text-sm text-white/60 max-h-[150px] overflow-y-auto whitespace-pre-wrap">
+                    {message || 'No message to save'}
+                  </div>
+                </div>
+                <div className="flex gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowTemplateManager(false)}
+                    className="flex-1 py-2.5 bg-white/5 hover:bg-white/10 rounded-xl text-sm transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={!message.trim()}
+                    className="flex-1 py-2.5 bg-purple-500 hover:bg-purple-600 rounded-xl text-sm font-medium transition-colors disabled:opacity-50"
+                  >
+                    Save Template
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* Edit Template Modal */}
+        {editingTemplate && (
+          <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+            <div className="glass rounded-2xl p-6 max-w-lg w-full">
+              <h3 className="font-semibold mb-4 flex items-center gap-2">
+                <span>✏️</span> Edit Template
+              </h3>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm text-white/60 mb-2">Template Name</label>
+                  <input
+                    type="text"
+                    value={editingTemplate.name}
+                    onChange={(e) => setEditingTemplate({ ...editingTemplate, name: e.target.value })}
+                    className="w-full px-4 py-2.5 bg-black/40 border border-white/10 rounded-xl text-sm focus-ring"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-white/60 mb-2">Message Content</label>
+                  <textarea
+                    value={editingTemplate.content}
+                    onChange={(e) => setEditingTemplate({ ...editingTemplate, content: e.target.value })}
+                    rows={6}
+                    className="w-full px-4 py-3 bg-black/40 border border-white/10 rounded-xl text-sm focus-ring resize-none"
+                  />
+                </div>
+                <div className="text-xs text-white/40">
+                  Created: {new Date(editingTemplate.createdAt).toLocaleDateString()}
+                  {editingTemplate.lastUsed && (
+                    <span className="ml-3">Last used: {new Date(editingTemplate.lastUsed).toLocaleDateString()}</span>
+                  )}
+                </div>
+                <div className="flex gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingTemplate(null)}
+                    className="flex-1 py-2.5 bg-white/5 hover:bg-white/10 rounded-xl text-sm transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      updateTemplate(editingTemplate.id, {
+                        name: editingTemplate.name,
+                        content: editingTemplate.content,
+                      });
+                      setEditingTemplate(null);
+                      addLog(`Updated template: ${editingTemplate.name}`, 'success');
+                    }}
+                    className="flex-1 py-2.5 bg-purple-500 hover:bg-purple-600 rounded-xl text-sm font-medium transition-colors"
+                  >
+                    Save Changes
+                  </button>
+                </div>
               </div>
             </div>
           </div>
