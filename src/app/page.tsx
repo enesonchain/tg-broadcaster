@@ -430,9 +430,13 @@ export default function TelegramBotBroadcaster() {
             source = 'register_command';
           }
         } else if (update.my_chat_member) {
-          // Bot was added to a chat
-          chat = update.my_chat_member.chat;
-          source = 'bot_added';
+          // Check if bot was added (not kicked/left)
+          const newStatus = update.my_chat_member.new_chat_member?.status;
+          if (newStatus === 'member' || newStatus === 'administrator') {
+            chat = update.my_chat_member.chat;
+            source = 'bot_added';
+          }
+          // Skip if bot was kicked or left
         }
 
         if (chat && !existingChatIds.has(chat.id) && !chatMap.has(chat.id)) {
@@ -499,6 +503,8 @@ export default function TelegramBotBroadcaster() {
       addLog(`Added: ${newChat.title}`, 'success');
     } catch (err: any) {
       addLog(`Failed to add ${discovered.title}: ${err.message}`, 'error');
+      // Remove from discovered list since bot likely doesn't have access
+      setDiscoveredChats(prev => prev.filter(c => c.id !== discovered.id));
     } finally {
       setIsLoading(false);
     }
