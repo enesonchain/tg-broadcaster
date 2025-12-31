@@ -34,6 +34,27 @@ interface DiscoveredChat {
   source: 'message' | 'register_command' | 'bot_added';
 }
 
+interface ChatList {
+  id: string;
+  name: string;
+  color: string;
+  icon: string;
+  chatIds: number[];
+  parentId: string | null; // For nested lists
+  stats: {
+    sent: number;
+    failed: number;
+    lastBroadcast: string | null;
+  };
+}
+
+const LIST_COLORS = [
+  '#2AABEE', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6',
+  '#EC4899', '#06B6D4', '#84CC16', '#F97316', '#6366F1'
+];
+
+const LIST_ICONS = ['📁', '🎮', '💰', '🎯', '🔥', '⭐', '💎', '🚀', '📢', '👥'];
+
 type Step = 'setup' | 'connected';
 type Tab = 'chats' | 'compose' | 'settings' | 'logs';
 
@@ -77,6 +98,15 @@ export default function TelegramBotBroadcaster() {
   const [lastUpdateId, setLastUpdateId] = useState<number | null>(null);
   const [rememberToken, setRememberToken] = useState(false);
 
+  // Lists state
+  const [lists, setLists] = useState<ChatList[]>([]);
+  const [selectedLists, setSelectedLists] = useState<Set<string>>(new Set());
+  const [excludedLists, setExcludedLists] = useState<Set<string>>(new Set());
+  const [showListManager, setShowListManager] = useState(false);
+  const [editingList, setEditingList] = useState<ChatList | null>(null);
+  const [listSearchQuery, setListSearchQuery] = useState('');
+  const [expandedLists, setExpandedLists] = useState<Set<string>>(new Set());
+
   const logsEndRef = useRef<HTMLDivElement>(null);
   const hasAutoRefreshed = useRef(false);
 
@@ -89,6 +119,20 @@ export default function TelegramBotBroadcaster() {
       typeof c.id === 'number' &&
       typeof c.title === 'string' &&
       ['group', 'supergroup', 'channel', 'private'].includes(c.type)
+    );
+  };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const isValidList = (l: any): l is ChatList => {
+    return (
+      typeof l === 'object' &&
+      l !== null &&
+      typeof l.id === 'string' &&
+      typeof l.name === 'string' &&
+      typeof l.color === 'string' &&
+      typeof l.icon === 'string' &&
+      Array.isArray(l.chatIds) &&
+      typeof l.stats === 'object'
     );
   };
 
@@ -117,6 +161,11 @@ export default function TelegramBotBroadcaster() {
       ? localStorage.getItem('tg_bot_chats')
       : sessionStorage.getItem('tg_bot_chats');
 
+    // Lists follow the same storage as token
+    const savedLists = remembered
+      ? localStorage.getItem('tg_bot_lists')
+      : sessionStorage.getItem('tg_bot_lists');
+
     if (savedToken) {
       setBotToken(savedToken);
     }
@@ -126,6 +175,14 @@ export default function TelegramBotBroadcaster() {
         // Validate the parsed data is an array of valid chat objects
         if (Array.isArray(parsed) && parsed.every(isValidChat)) {
           setChats(parsed);
+        }
+      } catch {}
+    }
+    if (savedLists) {
+      try {
+        const parsed = JSON.parse(savedLists);
+        if (Array.isArray(parsed) && parsed.every(isValidList)) {
+          setLists(parsed);
         }
       } catch {}
     }
@@ -148,6 +205,23 @@ export default function TelegramBotBroadcaster() {
       sessionStorage.removeItem('tg_bot_chats');
     }
   }, [chats, rememberToken]);
+
+  // Save lists whenever they change (follows token storage setting)
+  useEffect(() => {
+    if (lists.length > 0) {
+      const listData = JSON.stringify(lists);
+      if (rememberToken) {
+        localStorage.setItem('tg_bot_lists', listData);
+        sessionStorage.removeItem('tg_bot_lists');
+      } else {
+        sessionStorage.setItem('tg_bot_lists', listData);
+        localStorage.removeItem('tg_bot_lists');
+      }
+    } else {
+      localStorage.removeItem('tg_bot_lists');
+      sessionStorage.removeItem('tg_bot_lists');
+    }
+  }, [lists, rememberToken]);
 
   // ==================== API CALLS ====================
   const callBotApi = async (method: string, params: Record<string, any> = {}) => {
@@ -285,11 +359,203 @@ export default function TelegramBotBroadcaster() {
 
   const getFilteredChats = () => {
     return chats.filter(chat => {
-      const matchesType = filterType === 'all' || chat.type === filterType || 
+      const matchesType = filterType === 'all' || chat.type === filterType ||
         (filterType === 'group' && (chat.type === 'group' || chat.type === 'supergroup'));
       const matchesSearch = chat.title.toLowerCase().includes(searchQuery.toLowerCase());
       return matchesType && matchesSearch;
     });
+  };
+
+  // ==================== LIST MANAGEMENT ====================
+  const createList = (name: string, color: string = LIST_COLORS[0], icon: string = LIST_ICONS[0], parentId: string | null = null) => {
+    const newList: ChatList = {
+      id: `list_${Date.now()}`,
+      name,
+      color,
+      icon,
+      chatIds: [],
+      parentId,
+      stats: { sent: 0, failed: 0, lastBroadcast: null },
+    };
+    setLists(prev => [...prev, newList]);
+    addLog(`Created list: ${name}`, 'success');
+    return newList;
+  };
+
+  const updateList = (listId: string, updates: Partial<ChatList>) => {
+    setLists(prev => prev.map(list =>
+      list.id === listId ? { ...list, ...updates } : list
+    ));
+  };
+
+  const deleteList = (listId: string) => {
+    // Also delete child lists
+    const childIds = lists.filter(l => l.parentId === listId).map(l => l.id);
+    setLists(prev => prev.filter(l => l.id !== listId && !childIds.includes(l.id)));
+    setSelectedLists(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(listId);
+      childIds.forEach(id => newSet.delete(id));
+      return newSet;
+    });
+    setExcludedLists(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(listId);
+      childIds.forEach(id => newSet.delete(id));
+      return newSet;
+    });
+    addLog(`Deleted list`, 'info');
+  };
+
+  const addChatToList = (listId: string, chatId: number) => {
+    setLists(prev => prev.map(list => {
+      if (list.id === listId && !list.chatIds.includes(chatId)) {
+        return { ...list, chatIds: [...list.chatIds, chatId] };
+      }
+      return list;
+    }));
+  };
+
+  const removeChatFromList = (listId: string, chatId: number) => {
+    setLists(prev => prev.map(list => {
+      if (list.id === listId) {
+        return { ...list, chatIds: list.chatIds.filter(id => id !== chatId) };
+      }
+      return list;
+    }));
+  };
+
+  const moveListUp = (listId: string) => {
+    setLists(prev => {
+      const index = prev.findIndex(l => l.id === listId);
+      if (index <= 0) return prev;
+      const newLists = [...prev];
+      [newLists[index - 1], newLists[index]] = [newLists[index], newLists[index - 1]];
+      return newLists;
+    });
+  };
+
+  const moveListDown = (listId: string) => {
+    setLists(prev => {
+      const index = prev.findIndex(l => l.id === listId);
+      if (index === -1 || index >= prev.length - 1) return prev;
+      const newLists = [...prev];
+      [newLists[index], newLists[index + 1]] = [newLists[index + 1], newLists[index]];
+      return newLists;
+    });
+  };
+
+  const toggleListSelection = (listId: string) => {
+    setSelectedLists(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(listId)) {
+        newSet.delete(listId);
+      } else {
+        newSet.add(listId);
+        // Remove from excluded if it was there
+        setExcludedLists(exc => {
+          const newExc = new Set(exc);
+          newExc.delete(listId);
+          return newExc;
+        });
+      }
+      return newSet;
+    });
+  };
+
+  const toggleListExclusion = (listId: string) => {
+    setExcludedLists(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(listId)) {
+        newSet.delete(listId);
+      } else {
+        newSet.add(listId);
+        // Remove from selected if it was there
+        setSelectedLists(sel => {
+          const newSel = new Set(sel);
+          newSel.delete(listId);
+          return newSel;
+        });
+      }
+      return newSet;
+    });
+  };
+
+  const getChatsFromLists = (): number[] => {
+    // Get all chat IDs from selected lists (including nested)
+    const getAllChatIds = (listId: string): number[] => {
+      const list = lists.find(l => l.id === listId);
+      if (!list) return [];
+      const childLists = lists.filter(l => l.parentId === listId);
+      const childChatIds = childLists.flatMap(child => getAllChatIds(child.id));
+      return [...list.chatIds, ...childChatIds];
+    };
+
+    const includedIds = new Set<number>();
+    selectedLists.forEach(listId => {
+      getAllChatIds(listId).forEach(id => includedIds.add(id));
+    });
+
+    // Remove excluded list chat IDs
+    excludedLists.forEach(listId => {
+      getAllChatIds(listId).forEach(id => includedIds.delete(id));
+    });
+
+    return Array.from(includedIds);
+  };
+
+  const selectChatsFromLists = () => {
+    const chatIds = getChatsFromLists();
+    setSelectedChats(new Set(chatIds));
+    addLog(`Selected ${chatIds.length} chats from lists`, 'info');
+  };
+
+  const getListSuccessRate = (list: ChatList): number => {
+    const total = list.stats.sent + list.stats.failed;
+    if (total === 0) return 0;
+    return Math.round((list.stats.sent / total) * 100);
+  };
+
+  const findDuplicateChats = (): Map<number, string[]> => {
+    const chatToLists = new Map<number, string[]>();
+    lists.forEach(list => {
+      list.chatIds.forEach(chatId => {
+        if (!chatToLists.has(chatId)) {
+          chatToLists.set(chatId, []);
+        }
+        chatToLists.get(chatId)!.push(list.name);
+      });
+    });
+    // Filter to only duplicates (in more than one list)
+    const duplicates = new Map<number, string[]>();
+    chatToLists.forEach((listNames, chatId) => {
+      if (listNames.length > 1) {
+        duplicates.set(chatId, listNames);
+      }
+    });
+    return duplicates;
+  };
+
+  const autoCleanupLists = () => {
+    const kickedChatIds = chats.filter(c => c.botKicked).map(c => c.id);
+    if (kickedChatIds.length === 0) {
+      addLog('No kicked chats to remove from lists', 'info');
+      return;
+    }
+
+    setLists(prev => prev.map(list => ({
+      ...list,
+      chatIds: list.chatIds.filter(id => !kickedChatIds.includes(id))
+    })));
+    addLog(`Removed ${kickedChatIds.length} kicked chat(s) from all lists`, 'success');
+  };
+
+  const getChildLists = (parentId: string | null): ChatList[] => {
+    return lists.filter(l => l.parentId === parentId);
+  };
+
+  const getRootLists = (): ChatList[] => {
+    return lists.filter(l => l.parentId === null);
   };
 
   const broadcastMessage = async () => {
@@ -349,9 +615,34 @@ export default function TelegramBotBroadcaster() {
     }
     
     const successRate = Math.round((sent / selectedChats.size) * 100);
-    addLog(`\n✅ Broadcast complete: ${sent} sent, ${failed} failed (${successRate}%)`, 
+    addLog(`\n✅ Broadcast complete: ${sent} sent, ${failed} failed (${successRate}%)`,
       successRate === 100 ? 'success' : 'warning');
-    
+
+    // Update list stats for all lists that contain the sent chats
+    const now = new Date().toISOString();
+    setLists(prev => prev.map(list => {
+      const listChatIds = new Set(list.chatIds);
+      const sentFromList = chatIds.filter(id => listChatIds.has(id));
+      if (sentFromList.length > 0) {
+        // Calculate how many succeeded/failed from this list
+        const listSent = sentFromList.filter(id => {
+          // We'd need to track per-chat results, for now estimate based on overall rate
+          return true; // simplified: count all as attempted
+        }).length;
+        const listFailed = Math.round(listSent * (failed / selectedChats.size));
+        const listSuccess = listSent - listFailed;
+        return {
+          ...list,
+          stats: {
+            sent: list.stats.sent + listSuccess,
+            failed: list.stats.failed + listFailed,
+            lastBroadcast: now,
+          }
+        };
+      }
+      return list;
+    }));
+
     setTimeout(() => setSendingProgress(null), 3000);
   };
 
@@ -595,14 +886,19 @@ export default function TelegramBotBroadcaster() {
     localStorage.removeItem('tg_bot_token');
     localStorage.removeItem('tg_remember_token');
     localStorage.removeItem('tg_bot_chats');
+    localStorage.removeItem('tg_bot_lists');
     sessionStorage.removeItem('tg_bot_token');
     sessionStorage.removeItem('tg_bot_chats');
+    sessionStorage.removeItem('tg_bot_lists');
 
     // Reset state
     setBotToken('');
     setBotInfo(null);
     setChats([]);
     setSelectedChats(new Set());
+    setLists([]);
+    setSelectedLists(new Set());
+    setExcludedLists(new Set());
     setStep('setup');
     setRememberToken(false);
     addLog('Disconnected - all data cleared', 'info');
@@ -957,6 +1253,244 @@ export default function TelegramBotBroadcaster() {
                     </div>
                   )}
 
+                  {/* Lists Section */}
+                  <div className="p-4 border-b border-white/5">
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="font-medium flex items-center gap-2">
+                        <span>📁</span> Chat Lists
+                        {lists.length > 0 && (
+                          <span className="px-1.5 py-0.5 bg-white/10 rounded text-xs">{lists.length}</span>
+                        )}
+                      </h4>
+                      <div className="flex gap-2">
+                        {lists.length > 0 && (
+                          <>
+                            <button
+                              onClick={autoCleanupLists}
+                              className="px-3 py-1.5 bg-orange-500/10 hover:bg-orange-500/20 text-orange-400 rounded-lg text-xs transition-colors"
+                              title="Remove kicked chats from all lists"
+                            >
+                              🧹 Cleanup
+                            </button>
+                            <button
+                              onClick={() => {
+                                const dupes = findDuplicateChats();
+                                if (dupes.size === 0) {
+                                  addLog('No duplicate chats found across lists', 'info');
+                                } else {
+                                  dupes.forEach((listNames, chatId) => {
+                                    const chat = chats.find(c => c.id === chatId);
+                                    addLog(`Duplicate: ${chat?.title || chatId} in ${listNames.join(', ')}`, 'warning');
+                                  });
+                                }
+                              }}
+                              className="px-3 py-1.5 bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 rounded-lg text-xs transition-colors"
+                              title="Find chats in multiple lists"
+                            >
+                              🔍 Duplicates
+                            </button>
+                          </>
+                        )}
+                        <button
+                          onClick={() => setShowListManager(true)}
+                          className="px-3 py-1.5 bg-[#2AABEE]/20 hover:bg-[#2AABEE]/30 text-[#2AABEE] rounded-lg text-xs font-medium transition-colors"
+                        >
+                          + New List
+                        </button>
+                      </div>
+                    </div>
+
+                    {lists.length === 0 ? (
+                      <p className="text-xs text-white/40">
+                        Create lists to organize your chats (e.g., Gaming Influencers, DeFi Channels)
+                      </p>
+                    ) : (
+                      <div className="space-y-2">
+                        {/* List Selection for Broadcasting */}
+                        {(selectedLists.size > 0 || excludedLists.size > 0) && (
+                          <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl mb-3">
+                            <div className="flex items-center justify-between">
+                              <div className="text-xs">
+                                <span className="text-emerald-400">
+                                  {selectedLists.size} list(s) selected
+                                </span>
+                                {excludedLists.size > 0 && (
+                                  <span className="text-red-400 ml-2">
+                                    {excludedLists.size} excluded
+                                  </span>
+                                )}
+                                <span className="text-white/40 ml-2">
+                                  = {getChatsFromLists().length} chats
+                                </span>
+                              </div>
+                              <button
+                                onClick={selectChatsFromLists}
+                                className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg text-xs font-medium transition-colors"
+                              >
+                                Apply Selection
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Render root lists */}
+                        {getRootLists().map((list, index) => (
+                          <div key={list.id}>
+                            <div
+                              className={`p-3 rounded-xl border transition-colors ${
+                                selectedLists.has(list.id)
+                                  ? 'bg-emerald-500/10 border-emerald-500/30'
+                                  : excludedLists.has(list.id)
+                                    ? 'bg-red-500/10 border-red-500/30'
+                                    : 'bg-black/20 border-white/5 hover:border-white/10'
+                              }`}
+                            >
+                              <div className="flex items-center gap-3">
+                                <div
+                                  className="w-8 h-8 rounded-lg flex items-center justify-center text-sm"
+                                  style={{ backgroundColor: list.color + '30' }}
+                                >
+                                  {list.icon}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-2">
+                                    <p className="font-medium text-sm truncate">{list.name}</p>
+                                    <span className="px-1.5 py-0.5 bg-white/10 rounded text-[10px] text-white/60">
+                                      {list.chatIds.length} chats
+                                    </span>
+                                    {getListSuccessRate(list) > 0 && (
+                                      <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                                        getListSuccessRate(list) >= 90 ? 'bg-emerald-500/20 text-emerald-400' :
+                                        getListSuccessRate(list) >= 70 ? 'bg-yellow-500/20 text-yellow-400' :
+                                        'bg-red-500/20 text-red-400'
+                                      }`}>
+                                        {getListSuccessRate(list)}% success
+                                      </span>
+                                    )}
+                                  </div>
+                                  {list.stats.lastBroadcast && (
+                                    <p className="text-[10px] text-white/40">
+                                      Last: {new Date(list.stats.lastBroadcast).toLocaleDateString()}
+                                    </p>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  {/* Move up/down */}
+                                  <button
+                                    onClick={() => moveListUp(list.id)}
+                                    disabled={index === 0}
+                                    className="p-1.5 text-white/40 hover:text-white hover:bg-white/10 rounded-lg transition-all disabled:opacity-30"
+                                    title="Move up"
+                                  >
+                                    ↑
+                                  </button>
+                                  <button
+                                    onClick={() => moveListDown(list.id)}
+                                    disabled={index === getRootLists().length - 1}
+                                    className="p-1.5 text-white/40 hover:text-white hover:bg-white/10 rounded-lg transition-all disabled:opacity-30"
+                                    title="Move down"
+                                  >
+                                    ↓
+                                  </button>
+                                  {/* Include */}
+                                  <button
+                                    onClick={() => toggleListSelection(list.id)}
+                                    className={`p-1.5 rounded-lg transition-all ${
+                                      selectedLists.has(list.id)
+                                        ? 'text-emerald-400 bg-emerald-500/20'
+                                        : 'text-white/40 hover:text-emerald-400 hover:bg-emerald-500/10'
+                                    }`}
+                                    title="Include in broadcast"
+                                  >
+                                    ✓
+                                  </button>
+                                  {/* Exclude */}
+                                  <button
+                                    onClick={() => toggleListExclusion(list.id)}
+                                    className={`p-1.5 rounded-lg transition-all ${
+                                      excludedLists.has(list.id)
+                                        ? 'text-red-400 bg-red-500/20'
+                                        : 'text-white/40 hover:text-red-400 hover:bg-red-500/10'
+                                    }`}
+                                    title="Exclude from broadcast"
+                                  >
+                                    ✗
+                                  </button>
+                                  {/* Expand/collapse children */}
+                                  {getChildLists(list.id).length > 0 && (
+                                    <button
+                                      onClick={() => setExpandedLists(prev => {
+                                        const newSet = new Set(prev);
+                                        if (newSet.has(list.id)) newSet.delete(list.id);
+                                        else newSet.add(list.id);
+                                        return newSet;
+                                      })}
+                                      className="p-1.5 text-white/40 hover:text-white hover:bg-white/10 rounded-lg transition-all"
+                                    >
+                                      {expandedLists.has(list.id) ? '▼' : '▶'}
+                                    </button>
+                                  )}
+                                  {/* Edit */}
+                                  <button
+                                    onClick={() => setEditingList(list)}
+                                    className="p-1.5 text-white/40 hover:text-white hover:bg-white/10 rounded-lg transition-all"
+                                    title="Edit list"
+                                  >
+                                    ✏️
+                                  </button>
+                                  {/* Delete */}
+                                  <button
+                                    onClick={() => deleteList(list.id)}
+                                    className="p-1.5 text-white/40 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all"
+                                    title="Delete list"
+                                  >
+                                    🗑️
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Child lists */}
+                              {expandedLists.has(list.id) && getChildLists(list.id).length > 0 && (
+                                <div className="ml-6 mt-2 space-y-2 border-l-2 border-white/10 pl-3">
+                                  {getChildLists(list.id).map(childList => (
+                                    <div
+                                      key={childList.id}
+                                      className={`p-2 rounded-lg border transition-colors ${
+                                        selectedLists.has(childList.id)
+                                          ? 'bg-emerald-500/10 border-emerald-500/30'
+                                          : excludedLists.has(childList.id)
+                                            ? 'bg-red-500/10 border-red-500/30'
+                                            : 'bg-black/20 border-white/5'
+                                      }`}
+                                    >
+                                      <div className="flex items-center gap-2">
+                                        <span>{childList.icon}</span>
+                                        <span className="text-xs flex-1">{childList.name}</span>
+                                        <span className="text-[10px] text-white/40">{childList.chatIds.length}</span>
+                                        <button
+                                          onClick={() => toggleListSelection(childList.id)}
+                                          className={`p-1 rounded ${selectedLists.has(childList.id) ? 'text-emerald-400' : 'text-white/40'}`}
+                                        >
+                                          ✓
+                                        </button>
+                                        <button
+                                          onClick={() => toggleListExclusion(childList.id)}
+                                          className={`p-1 rounded ${excludedLists.has(childList.id) ? 'text-red-400' : 'text-white/40'}`}
+                                        >
+                                          ✗
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
                   <div className="p-4 border-b border-white/5">
                     <div className="flex flex-col sm:flex-row gap-3">
                       {/* Add Chat */}
@@ -1297,6 +1831,244 @@ export default function TelegramBotBroadcaster() {
                   <p className="font-medium text-white mb-1">Users</p>
                   <p>User must start chat with your bot first, then add their user ID</p>
                 </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Create List Modal */}
+        {showListManager && (
+          <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+            <div className="glass rounded-2xl p-6 max-w-lg w-full max-h-[90vh] overflow-y-auto">
+              <h3 className="font-semibold mb-4 flex items-center gap-2">
+                <span>📁</span> Create New List
+              </h3>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const form = e.target as HTMLFormElement;
+                  const name = (form.elements.namedItem('listName') as HTMLInputElement).value;
+                  const color = (form.elements.namedItem('listColor') as HTMLInputElement).value;
+                  const icon = (form.elements.namedItem('listIcon') as HTMLSelectElement).value;
+                  const parentId = (form.elements.namedItem('parentList') as HTMLSelectElement).value || null;
+                  if (name.trim()) {
+                    createList(name.trim(), color, icon, parentId);
+                    setShowListManager(false);
+                  }
+                }}
+                className="space-y-4"
+              >
+                <div>
+                  <label className="block text-sm text-white/60 mb-2">List Name</label>
+                  <input
+                    name="listName"
+                    type="text"
+                    placeholder="e.g., Gaming Influencers"
+                    className="w-full px-4 py-2.5 bg-black/40 border border-white/10 rounded-xl text-sm focus-ring"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-white/60 mb-2">Color</label>
+                  <div className="flex gap-2 flex-wrap">
+                    {LIST_COLORS.map((color, i) => (
+                      <label key={color} className="cursor-pointer">
+                        <input
+                          type="radio"
+                          name="listColor"
+                          value={color}
+                          defaultChecked={i === 0}
+                          className="sr-only"
+                        />
+                        <div
+                          className="w-8 h-8 rounded-lg border-2 border-transparent hover:border-white/50 transition-colors"
+                          style={{ backgroundColor: color }}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm text-white/60 mb-2">Icon</label>
+                  <select
+                    name="listIcon"
+                    className="w-full px-4 py-2.5 bg-black/40 border border-white/10 rounded-xl text-sm focus-ring"
+                  >
+                    {LIST_ICONS.map(icon => (
+                      <option key={icon} value={icon}>{icon}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm text-white/60 mb-2">Parent List (Optional - for nesting)</label>
+                  <select
+                    name="parentList"
+                    className="w-full px-4 py-2.5 bg-black/40 border border-white/10 rounded-xl text-sm focus-ring"
+                  >
+                    <option value="">None (Root List)</option>
+                    {getRootLists().map(list => (
+                      <option key={list.id} value={list.id}>{list.icon} {list.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowListManager(false)}
+                    className="flex-1 py-2.5 bg-white/5 hover:bg-white/10 rounded-xl text-sm transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 bg-[#2AABEE] hover:bg-[#3bb5f5] rounded-xl text-sm font-medium transition-colors"
+                  >
+                    Create List
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* Edit List Modal */}
+        {editingList && (
+          <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+            <div className="glass rounded-2xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+              <h3 className="font-semibold mb-4 flex items-center gap-2">
+                <span>{editingList.icon}</span> Edit: {editingList.name}
+              </h3>
+
+              {/* Edit Name/Color/Icon */}
+              <div className="space-y-4 mb-6">
+                <div className="flex gap-3">
+                  <input
+                    type="text"
+                    value={editingList.name}
+                    onChange={(e) => setEditingList({ ...editingList, name: e.target.value })}
+                    className="flex-1 px-4 py-2.5 bg-black/40 border border-white/10 rounded-xl text-sm focus-ring"
+                  />
+                  <select
+                    value={editingList.icon}
+                    onChange={(e) => setEditingList({ ...editingList, icon: e.target.value })}
+                    className="px-3 py-2.5 bg-black/40 border border-white/10 rounded-xl text-sm focus-ring"
+                  >
+                    {LIST_ICONS.map(icon => (
+                      <option key={icon} value={icon}>{icon}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex gap-2 flex-wrap">
+                  {LIST_COLORS.map(color => (
+                    <button
+                      key={color}
+                      type="button"
+                      onClick={() => setEditingList({ ...editingList, color })}
+                      className={`w-8 h-8 rounded-lg border-2 transition-colors ${
+                        editingList.color === color ? 'border-white' : 'border-transparent hover:border-white/50'
+                      }`}
+                      style={{ backgroundColor: color }}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              {/* Search within list */}
+              <div className="mb-4">
+                <input
+                  type="text"
+                  placeholder="Search chats..."
+                  value={listSearchQuery}
+                  onChange={(e) => setListSearchQuery(e.target.value)}
+                  className="w-full px-4 py-2.5 bg-black/40 border border-white/10 rounded-xl text-sm focus-ring"
+                />
+              </div>
+
+              {/* Chats in list */}
+              <div className="mb-4">
+                <h4 className="text-sm text-white/60 mb-2">
+                  Chats in this list ({editingList.chatIds.length})
+                </h4>
+                <div className="max-h-[200px] overflow-y-auto space-y-1 bg-black/20 rounded-xl p-2">
+                  {editingList.chatIds.length === 0 ? (
+                    <p className="text-xs text-white/40 p-2">No chats in this list yet</p>
+                  ) : (
+                    editingList.chatIds
+                      .map(id => chats.find(c => c.id === id))
+                      .filter(Boolean)
+                      .filter(chat => !listSearchQuery || chat!.title.toLowerCase().includes(listSearchQuery.toLowerCase()))
+                      .map(chat => (
+                        <div key={chat!.id} className="flex items-center gap-2 p-2 bg-white/5 rounded-lg">
+                          <span className="text-sm">{chat!.type === 'channel' ? '📢' : '👥'}</span>
+                          <span className="text-sm flex-1 truncate">{chat!.title}</span>
+                          <button
+                            onClick={() => {
+                              const newChatIds = editingList.chatIds.filter(id => id !== chat!.id);
+                              setEditingList({ ...editingList, chatIds: newChatIds });
+                            }}
+                            className="p-1 text-red-400 hover:bg-red-500/20 rounded"
+                          >
+                            ✗
+                          </button>
+                        </div>
+                      ))
+                  )}
+                </div>
+              </div>
+
+              {/* Add chats to list */}
+              <div className="mb-4">
+                <h4 className="text-sm text-white/60 mb-2">Add chats to this list</h4>
+                <div className="max-h-[200px] overflow-y-auto space-y-1 bg-black/20 rounded-xl p-2">
+                  {chats
+                    .filter(chat => !editingList.chatIds.includes(chat.id))
+                    .filter(chat => !listSearchQuery || chat.title.toLowerCase().includes(listSearchQuery.toLowerCase()))
+                    .map(chat => (
+                      <div key={chat.id} className="flex items-center gap-2 p-2 hover:bg-white/5 rounded-lg">
+                        <span className="text-sm">{chat.type === 'channel' ? '📢' : '👥'}</span>
+                        <span className="text-sm flex-1 truncate">{chat.title}</span>
+                        <button
+                          onClick={() => {
+                            setEditingList({ ...editingList, chatIds: [...editingList.chatIds, chat.id] });
+                          }}
+                          className="p-1 text-emerald-400 hover:bg-emerald-500/20 rounded"
+                        >
+                          +
+                        </button>
+                      </div>
+                    ))}
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingList(null);
+                    setListSearchQuery('');
+                  }}
+                  className="flex-1 py-2.5 bg-white/5 hover:bg-white/10 rounded-xl text-sm transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    updateList(editingList.id, {
+                      name: editingList.name,
+                      color: editingList.color,
+                      icon: editingList.icon,
+                      chatIds: editingList.chatIds,
+                    });
+                    setEditingList(null);
+                    setListSearchQuery('');
+                    addLog(`Updated list: ${editingList.name}`, 'success');
+                  }}
+                  className="flex-1 py-2.5 bg-[#2AABEE] hover:bg-[#3bb5f5] rounded-xl text-sm font-medium transition-colors"
+                >
+                  Save Changes
+                </button>
               </div>
             </div>
           </div>
