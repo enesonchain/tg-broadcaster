@@ -694,11 +694,6 @@ export default function TelegramBotBroadcaster() {
                   </button>
                   <div>
                     <p className="text-sm text-white/80">Remember token</p>
-                    <p className="text-xs text-white/40">
-                      {rememberToken
-                        ? '⚠️ Token will be saved in browser storage (less secure)'
-                        : '🔒 Token cleared when you close this tab (more secure)'}
-                    </p>
                   </div>
                 </div>
 
