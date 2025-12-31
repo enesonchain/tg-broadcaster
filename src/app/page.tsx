@@ -75,6 +75,7 @@ export default function TelegramBotBroadcaster() {
   const [discoveredChats, setDiscoveredChats] = useState<DiscoveredChat[]>([]);
   const [isDiscovering, setIsDiscovering] = useState(false);
   const [lastUpdateId, setLastUpdateId] = useState<number | null>(null);
+  const [rememberToken, setRememberToken] = useState(false);
 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -90,9 +91,15 @@ export default function TelegramBotBroadcaster() {
 
   // Load saved data
   useEffect(() => {
-    const savedToken = localStorage.getItem('tg_bot_token');
+    // Check if user opted to remember token (localStorage) or session only (sessionStorage)
+    const remembered = localStorage.getItem('tg_remember_token') === 'true';
+    setRememberToken(remembered);
+
+    const savedToken = remembered
+      ? localStorage.getItem('tg_bot_token')
+      : sessionStorage.getItem('tg_bot_token');
     const savedChats = localStorage.getItem('tg_bot_chats');
-    
+
     if (savedToken) {
       setBotToken(savedToken);
     }
@@ -135,14 +142,25 @@ export default function TelegramBotBroadcaster() {
       setError('Please enter your bot token');
       return;
     }
-    
+
     setIsLoading(true);
     setError('');
-    
+
     try {
       const me = await callBotApi('getMe');
       setBotInfo(me);
-      localStorage.setItem('tg_bot_token', botToken);
+
+      // Save token based on user preference
+      if (rememberToken) {
+        localStorage.setItem('tg_bot_token', botToken);
+        localStorage.setItem('tg_remember_token', 'true');
+        sessionStorage.removeItem('tg_bot_token');
+      } else {
+        sessionStorage.setItem('tg_bot_token', botToken);
+        localStorage.removeItem('tg_bot_token');
+        localStorage.removeItem('tg_remember_token');
+      }
+
       setStep('connected');
       addLog(`Connected as @${me.username}`, 'success');
     } catch (err: any) {
@@ -503,9 +521,12 @@ export default function TelegramBotBroadcaster() {
 
   const disconnect = () => {
     localStorage.removeItem('tg_bot_token');
+    localStorage.removeItem('tg_remember_token');
+    sessionStorage.removeItem('tg_bot_token');
     setBotToken('');
     setBotInfo(null);
     setStep('setup');
+    setRememberToken(false);
     addLog('Disconnected', 'info');
   };
 
@@ -608,6 +629,32 @@ export default function TelegramBotBroadcaster() {
                     placeholder="123456789:ABCdefGHI..."
                     className="w-full px-4 py-3 bg-black/40 border border-white/10 rounded-xl text-white placeholder-white/20 focus-ring font-mono text-sm"
                   />
+                </div>
+
+                <div className="flex items-start gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setRememberToken(!rememberToken)}
+                    className={`mt-0.5 w-5 h-5 rounded border-2 flex items-center justify-center transition-colors ${
+                      rememberToken
+                        ? 'bg-[#2AABEE] border-[#2AABEE]'
+                        : 'border-white/20 hover:border-white/40'
+                    }`}
+                  >
+                    {rememberToken && (
+                      <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                      </svg>
+                    )}
+                  </button>
+                  <div>
+                    <p className="text-sm text-white/80">Remember token</p>
+                    <p className="text-xs text-white/40">
+                      {rememberToken
+                        ? '⚠️ Token will be saved in browser storage (less secure)'
+                        : '🔒 Token cleared when you close this tab (more secure)'}
+                    </p>
+                  </div>
                 </div>
 
                 {error && (
