@@ -17,6 +17,7 @@ interface Chat {
   type: 'group' | 'supergroup' | 'channel' | 'private';
   username?: string;
   memberCount?: number;
+  botKicked?: boolean;
 }
 
 interface LogEntry {
@@ -453,6 +454,53 @@ export default function TelegramBotBroadcaster() {
     }
   };
 
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const refreshChats = async () => {
+    if (chats.length === 0) return;
+
+    setIsRefreshing(true);
+    addLog('Refreshing chat statuses...', 'info');
+
+    let updated = 0;
+    let kicked = 0;
+
+    const updatedChats = await Promise.all(
+      chats.map(async (chat) => {
+        try {
+          // Try to get chat info - if it fails, bot was kicked
+          const chatInfo = await callBotApi('getChat', { chat_id: chat.id });
+
+          // Try to get updated member count
+          let memberCount = chat.memberCount;
+          try {
+            memberCount = await callBotApi('getChatMemberCount', { chat_id: chat.id });
+          } catch {}
+
+          updated++;
+          return {
+            ...chat,
+            title: chatInfo.title || chatInfo.first_name || chat.title,
+            memberCount,
+            botKicked: false,
+          };
+        } catch (err: any) {
+          // Bot was likely kicked or chat was deleted
+          kicked++;
+          addLog(`Bot no longer in: ${chat.title}`, 'warning');
+          return {
+            ...chat,
+            botKicked: true,
+          };
+        }
+      })
+    );
+
+    setChats(updatedChats);
+    addLog(`Refresh complete: ${updated} active, ${kicked} kicked/removed`, kicked > 0 ? 'warning' : 'success');
+    setIsRefreshing(false);
+  };
+
   const disconnect = () => {
     localStorage.removeItem('tg_bot_token');
     setBotToken('');
@@ -823,6 +871,15 @@ export default function TelegramBotBroadcaster() {
                           <option value="private">Private</option>
                         </select>
                         <button
+                          onClick={refreshChats}
+                          disabled={isRefreshing || chats.length === 0}
+                          className="px-4 py-2.5 bg-white/5 hover:bg-white/10 rounded-xl text-sm transition-colors disabled:opacity-50 flex items-center gap-2"
+                          title="Refresh chat statuses"
+                        >
+                          <span className={isRefreshing ? 'animate-spin' : ''}>🔄</span>
+                          {isRefreshing ? 'Refreshing...' : 'Refresh'}
+                        </button>
+                        <button
                           onClick={selectAll}
                           className="px-4 py-2.5 bg-white/5 hover:bg-white/10 rounded-xl text-sm transition-colors"
                         >
@@ -852,28 +909,43 @@ export default function TelegramBotBroadcaster() {
                         {filteredChats.map(chat => (
                           <div
                             key={chat.id}
-                            className={`p-4 flex items-center gap-4 transition-colors ${
-                              selectedChats.has(chat.id) ? 'bg-[#2AABEE]/10' : 'hover:bg-white/[0.02]'
+                            onClick={() => toggleChat(chat.id)}
+                            className={`p-4 flex items-center gap-4 transition-colors cursor-pointer ${
+                              chat.botKicked
+                                ? 'bg-red-500/10 hover:bg-red-500/15'
+                                : selectedChats.has(chat.id)
+                                  ? 'bg-[#2AABEE]/10 hover:bg-[#2AABEE]/15'
+                                  : 'hover:bg-white/[0.02]'
                             }`}
                           >
-                            <button
-                              onClick={() => toggleChat(chat.id)}
+                            <div
                               className={`w-10 h-10 rounded-xl flex items-center justify-center text-xl transition-colors ${
-                                selectedChats.has(chat.id) ? 'bg-[#2AABEE]' : 'bg-white/5'
+                                chat.botKicked
+                                  ? 'bg-red-500/20'
+                                  : selectedChats.has(chat.id)
+                                    ? 'bg-[#2AABEE]'
+                                    : 'bg-white/5'
                               }`}
                             >
-                              {chat.type === 'channel' ? '📢' : chat.type === 'private' ? '👤' : '👥'}
-                            </button>
-                            
+                              {chat.botKicked ? '⛔' : chat.type === 'channel' ? '📢' : chat.type === 'private' ? '👤' : '👥'}
+                            </div>
+
                             <div className="flex-1 min-w-0">
-                              <p className="font-medium truncate">{chat.title}</p>
+                              <p className={`font-medium truncate ${chat.botKicked ? 'text-red-400' : ''}`}>
+                                {chat.title}
+                                {chat.botKicked && (
+                                  <span className="ml-2 px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded text-[10px]">
+                                    Bot Kicked
+                                  </span>
+                                )}
+                              </p>
                               <p className="text-xs text-white/40">
                                 {chat.type} • ID: {chat.id}
                                 {chat.memberCount && ` • ${chat.memberCount.toLocaleString()} members`}
                               </p>
                             </div>
-                            
-                            <div className="flex items-center gap-2">
+
+                            <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                               <button
                                 onClick={() => testMessage(chat.id)}
                                 className="p-2 text-white/40 hover:text-white hover:bg-white/10 rounded-lg transition-all"
